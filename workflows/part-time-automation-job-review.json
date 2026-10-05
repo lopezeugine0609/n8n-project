@@ -1,0 +1,116 @@
+{
+  "id": "3b7b6e5b-9c5f-4d1e-bc24-90f52c1b36b9",
+  "name": "Part-Time Automation Job Review",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "c6f5605a-5601-48c3-a775-067ac2f08864",
+      "name": "Daily at 9 AM UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        260
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8e0fd9b4-a81b-4707-82d4-80283c580ecb",
+      "name": "Run search now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://remotive.com/api/remote-jobs",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "search",
+              "value": "automation"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "d0c3c01c-8c85-4bc7-b17f-e42c0f7a5685",
+      "name": "Search Remotive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const payload = $input.first()?.json ?? {};\nconst jobs = Array.isArray(payload.jobs) ? payload.jobs : [];\nconst state = $getWorkflowStaticData('global');\nstate.seenJobs ??= {};\nconst rolePattern = /automation|n8n|workflow|rpa|zapier|make\\.com/i;\nconst now = Date.now();\n\nfor (const [id, seenAt] of Object.entries(state.seenJobs)) {\n  if (now - Date.parse(seenAt) > 45 * 24 * 60 * 60 * 1000) delete state.seenJobs[id];\n}\n\nconst matches = [];\nfor (const job of jobs) {\n  const roleText = [job.title, job.category, ...(job.tags ?? [])].join(' ');\n  if (job.job_type !== 'part_time' || !rolePattern.test(roleText) || state.seenJobs[job.id]) continue;\n  state.seenJobs[job.id] = new Date(now).toISOString();\n  const company = job.company_name || 'the hiring team';\n  matches.push({\n    json: {\n      jobId: job.id,\n      title: job.title,\n      company,\n      jobType: job.job_type,\n      location: job.candidate_required_location,\n      salary: job.salary || 'Not listed',\n      postedAt: job.publication_date,\n      source: 'Remotive',\n      applicationUrl: job.url,\n      status: 'Needs your review',\n      applicationNoteDraft: `Hello ${company} hiring team,\\n\\nI am interested in the part-time ${job.title} role. My relevant experience includes [add accurate examples from your background]. I am particularly interested in [mention a specific responsibility from the listing].\\n\\nThank you for your consideration,\\n[Your name]`,\n      reviewBeforeApplying: true\n    }\n  });\n}\n\nreturn matches;"
+      },
+      "id": "6617bf83-d13a-4638-a226-4fd6ce984f53",
+      "name": "Filter and prepare review items",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        340
+      ]
+    }
+  ],
+  "connections": {
+    "Daily at 9 AM UTC": {
+      "main": [
+        [
+          {
+            "node": "Search Remotive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run search now": {
+      "main": [
+        [
+          {
+            "node": "Search Remotive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Remotive": {
+      "main": [
+        [
+          {
+            "node": "Filter and prepare review items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "611a177e-d086-41c6-8bca-0be14e4bc929"
+}

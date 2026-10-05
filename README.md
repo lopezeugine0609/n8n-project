@@ -24,6 +24,12 @@ Version-controlled n8n workflow exports, with a local n8n and PostgreSQL stack f
 
 n8n does not compile workflows into binaries: this repository versions the native workflow JSON exports. Keep API keys and credentials in n8n's credential store, never in workflow JSON or Git.
 
+### Part-time automation job review
+
+`workflows/part-time-automation-job-review.json` checks Remotive once daily at 9 AM UTC (or on a manual run), keeps only part-time listings related to automation, n8n, workflow tooling, RPA, Zapier, or Make, and produces a review item with the original listing link and a cover-note draft containing explicit profile placeholders. New listings are deduplicated for 45 days. The workflow is imported inactive; review and activate it in n8n. Results appear in the execution data. Remotive asks API users to keep request volume low and link to the original listing, so the workflow makes one request per day and preserves the Remotive link/source.
+
+LinkedIn, Indeed, and Wellfound are not queried by this starter workflow. It does not scrape logged-in sites or submit applications. Add those sources only through their permitted APIs/integrations. Tailored application drafts need your accurate resume/profile details, and every application should be reviewed before you submit it.
+
 Check service status with `docker compose ps` and logs with `docker compose logs -f n8n`. Stop the services with `docker compose down`; workflow data remains in the named volumes. Do not use `docker compose down -v` unless you intend to permanently delete the database and n8n data.
 
 ## Public deployment
