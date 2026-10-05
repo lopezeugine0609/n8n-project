@@ -30,6 +30,10 @@ n8n does not compile workflows into binaries: this repository versions the nativ
 
 LinkedIn, Indeed, and Wellfound are not queried by this starter workflow. It does not scrape logged-in sites or submit applications. Add those sources only through their permitted APIs/integrations. Tailored application drafts need your accurate resume/profile details, and every application should be reviewed before you submit it.
 
+### Meeting audio summary router
+
+`workflows/meeting-audio-summary-router.json` receives a meeting recording on `POST /webhook/meeting-audio` (or, optionally, from a Google Drive folder). AssemblyAI transcribes it with speaker labels, called through HTTP Request nodes with a polling loop. OpenAI then returns structured notes: a summary, action items, contacts, and any agreed follow-up appointment. If a follow-up with a date and time was agreed, the workflow upserts the contact in HubSpot, logs the meeting, creates a Google Calendar event, and emails the notes. Otherwise it only emails the notes. All third-party APIs are called through built-in nodes; no community nodes are needed. Setup, architecture, the OpenAI payload, and polling tips are in [`docs/meeting-audio-summary-router.md`](docs/meeting-audio-summary-router.md).
+
 Check service status with `docker compose ps` and logs with `docker compose logs -f n8n`. Stop the services with `docker compose down`; workflow data remains in the named volumes. Do not use `docker compose down -v` unless you intend to permanently delete the database and n8n data.
 
 ## Public deployment

@@ -1,0 +1,861 @@
+{
+  "id": "daf0bd98-c91d-4630-a502-c8d540d7ac0a",
+  "name": "Meeting Audio Summary Router",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Meeting audio → AssemblyAI → OpenAI → Email / CRM\nPOST a recording to the webhook (multipart field `audio`, or JSON `audio_url`). Optional fields: `recipient_email`, `meeting_title`, `meeting_datetime` (ISO), `timezone` (IANA), `speakers_expected`, `language_code`.\n\n**Credentials to create:** Header Auth \"AssemblyAI API\" (`Authorization: <key>`), OpenAI API, HubSpot App Token, Google Calendar OAuth2, Gmail OAuth2, plus a Header Auth for the webhook itself.\n\nSettings (timezone, model) live at the top of **Normalize input**. Full guide: `docs/meeting-audio-summary-router.md`.",
+        "height": 300,
+        "width": 520
+      },
+      "id": "7ddf5031-09d8-4add-acd9-ce97dcbe0909",
+      "name": "Sticky: overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -300,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### AssemblyAI polling loop\nWait 15 s → GET status → `completed` continues, `error` stops, anything else loops.\n**Keep polling?** caps the loop at 80 checks (~20 min). Raise it for recordings longer than ~2 h.",
+        "height": 200,
+        "width": 460,
+        "color": 5
+      },
+      "id": "9ac7c695-30e9-4f65-a52b-ea96f124f864",
+      "name": "Sticky: polling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1260,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Routing\n**Path B (CRM)** when a follow-up with a specific date+time was agreed and we have an email: HubSpot contact upsert → HubSpot meeting → Google Calendar → email.\n**Path A (Email)** otherwise, if an email is known.\nNo email anywhere → execution fails as *Manual review* so it shows up in the Executions list.",
+        "height": 220,
+        "width": 520,
+        "color": 4
+      },
+      "id": "6156f8bc-c4bf-4ce3-abc9-dccf01933fed",
+      "name": "Sticky: routing",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        -260
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meeting-audio",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {
+          "binaryPropertyName": "audio",
+          "responseData": "{\"status\":\"accepted\",\"message\":\"Transcription started. Notes will be emailed when ready.\"}"
+        }
+      },
+      "id": "8011989e-2766-451f-a2a3-76bfaad4d4a0",
+      "name": "Receive audio (Webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -260,
+        300
+      ],
+      "webhookId": "1a307d63-8d58-4edb-a923-d1614791cba1"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "0edd4e65-afc4-4346-a58d-f6fbce7fb0b2",
+      "name": "New recording in Drive folder",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [
+        -260,
+        540
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "options": {}
+      },
+      "id": "12fcb2d9-65cf-43c3-ac8a-5a7276c4bd92",
+      "name": "Download recording",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -40,
+        540
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ===== Workflow settings: edit these before activating =====\nconst CONFIG = {\n  defaultTimezone: 'UTC', // IANA zone, e.g. 'America/New_York'. Used when the request does not send one.\n  openaiModel: 'gpt-4o', // 'gpt-4o-mini' is cheaper. Must support response_format json_schema.\n  defaultAppointmentMinutes: 30, // Used when a follow-up has a start time but no end time.\n};\n\nconst item = $input.first();\n// Webhook: form fields / JSON are under `body`. Google Drive: the item itself is the file metadata.\nconst body = item.json.body ?? item.json;\nconst binaries = item.binary ?? {};\nconst audioKey =\n  Object.keys(binaries).find((k) => /^(audio|video)\\//.test(binaries[k].mimeType ?? '')) ??\n  Object.keys(binaries)[0];\nconst audioUrl = typeof body.audio_url === 'string' ? body.audio_url.trim() : '';\n\nif (!audioKey && !audioUrl) {\n  throw new Error(\n    'No audio received. Send a multipart file field (curl -F \"audio=@meeting.mp3\") or a JSON body with \"audio_url\".',\n  );\n}\n\nconst timezone = body.timezone || CONFIG.defaultTimezone;\nif (!DateTime.now().setZone(timezone).isValid) throw new Error(`Unknown timezone \"${timezone}\".`);\n\n// Relative dates in the recording (\"next Tuesday at 3\") are resolved against this moment.\nlet reference = body.meeting_datetime\n  ? DateTime.fromISO(String(body.meeting_datetime), { zone: timezone })\n  : DateTime.now().setZone(timezone);\nif (!reference.isValid) reference = DateTime.now().setZone(timezone);\n\nconst speakersExpected = Number.parseInt(body.speakers_expected, 10);\nconst transcriptOptions = { speaker_labels: true, punctuate: true, format_text: true };\nif (speakersExpected > 0) transcriptOptions.speakers_expected = speakersExpected;\nif (body.language_code) transcriptOptions.language_code = String(body.language_code);\nelse transcriptOptions.language_detection = true;\n\nconst fileName = (audioKey && binaries[audioKey].fileName) || body.name || '';\n\nreturn [\n  {\n    json: {\n      source: audioKey ? 'upload' : 'url',\n      audio_url: audioUrl,\n      file_name: fileName,\n      meeting_title: body.meeting_title || fileName.replace(/\\.[^.]+$/, '') || 'Meeting',\n      recipient_email: typeof body.recipient_email === 'string' ? body.recipient_email.trim() : '',\n      timezone,\n      reference_datetime: reference.toISO(),\n      transcript_options: transcriptOptions,\n      openai_model: CONFIG.openaiModel,\n      default_appointment_minutes: CONFIG.defaultAppointmentMinutes,\n    },\n    ...(audioKey ? { binary: { audio: binaries[audioKey] } } : {}),\n  },\n];"
+      },
+      "id": "acf761c4-4c9e-4a62-a851-4cc75f649a2e",
+      "name": "Normalize input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "9ffa4d8e-7208-40e0-af1d-952f1cc35597",
+              "leftValue": "={{ $json.source }}",
+              "rightValue": "upload",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "460846a6-4721-4956-a9e2-10731be1247f",
+      "name": "Audio file attached?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.assemblyai.com/v2/upload",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "audio",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "f2258111-b708-486e-a117-5b702bbebf98",
+      "name": "AssemblyAI: upload audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.assemblyai.com/v2/transcript",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({}, $('Normalize input').first().json.transcript_options, { audio_url: $json.upload_url || $('Normalize input').first().json.audio_url })) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "6f9caf4e-79a0-4fee-a852-80c070501453",
+      "name": "AssemblyAI: request transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "a8ba4518-bfd9-4eaa-a946-a4b379ca753d",
+      "name": "Wait 15 seconds",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1140,
+        300
+      ],
+      "webhookId": "afc8410d-30ad-472d-a9a9-cf3d4faa08ea"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.assemblyai.com/v2/transcript/{{ $('AssemblyAI: request transcript').first().json.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "07d618fc-16c7-4e56-ac40-527e611cc280",
+      "name": "AssemblyAI: get transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1360,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5c1adc2e-327a-407e-a907-3fbd6df14d5b",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "completed",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "completed"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8a4e893b-20f4-474d-a634-8590ce72ed3f",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "error",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "error"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "queued / processing"
+        }
+      },
+      "id": "10462d45-7a76-463a-aab4-8a65d5b74b82",
+      "name": "Transcript status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1580,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "88f40c06-2281-4bf2-a328-24700495d8b6",
+              "leftValue": "={{ $runIndex }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "1710904b-93e7-4bfe-a7c2-e810a66e2650",
+      "name": "Keep polling?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1800,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ 'AssemblyAI transcript ' + $('AssemblyAI: request transcript').first().json.id + ' was still \"' + $json.status + '\" after 80 checks (~20 min).' }}"
+      },
+      "id": "4073bc6d-2cce-4a46-a035-e305cab7a35b",
+      "name": "Transcription timed out",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2040,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ 'AssemblyAI transcription failed: ' + ($json.error || 'unknown error') }}"
+      },
+      "id": "82c5567d-5300-476d-a3fc-0a285572adf5",
+      "name": "Transcription failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1800,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const t = $input.first().json;\nconst input = $('Normalize input').first().json;\n\nconst clock = (ms) => {\n  const s = Math.floor(ms / 1000);\n  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;\n};\nconst lines =\n  Array.isArray(t.utterances) && t.utterances.length\n    ? t.utterances.map((u) => `[${clock(u.start)}] Speaker ${u.speaker}: ${u.text}`)\n    : [t.text ?? ''];\nlet transcript = lines.join('\\n').trim();\nif (!transcript) throw new Error(`AssemblyAI transcript ${t.id} is empty; the recording may be silent.`);\n\n// ~350k characters is roughly 90k tokens, which fits gpt-4o's 128k context with room for the answer.\nconst MAX_CHARS = 350000;\nconst truncated = transcript.length > MAX_CHARS;\nif (truncated) transcript = transcript.slice(0, MAX_CHARS);\n\nconst str = (description) => ({ type: 'string', description });\nconst nullable = (description) => ({ type: ['string', 'null'], description });\nconst object = (properties) => ({\n  type: 'object',\n  additionalProperties: false,\n  required: Object.keys(properties),\n  properties,\n});\n\nconst schema = object({\n  meeting_title: str('Short descriptive title for the meeting.'),\n  executive_summary: str('3-6 sentence summary written for a busy executive.'),\n  key_takeaways: { type: 'array', items: { type: 'string' }, description: 'Decisions, insights, and important facts.' },\n  action_items: {\n    type: 'array',\n    items: object({\n      task: str('The concrete next step.'),\n      owner: nullable('Person responsible, if stated.'),\n      due: nullable('Deadline as said, or YYYY-MM-DD if it can be resolved.'),\n    }),\n  },\n  contacts: {\n    type: 'array',\n    description: 'People named in the meeting with their details.',\n    items: object({\n      name: nullable('Full name as stated.'),\n      email: nullable('Email address, only if clearly stated.'),\n      phone: nullable('Phone number, only if clearly stated.'),\n      company: nullable('Company or organisation.'),\n      role: nullable('Job title or role.'),\n    }),\n  },\n  primary_contact_email: nullable('Email of the external person (client, prospect, candidate) who should receive these notes.'),\n  appointment: object({\n    detected: { type: 'boolean', description: 'True only if a follow-up with a specific date AND time was agreed.' },\n    title: nullable('What the follow-up is, e.g. \"Pricing review call\".'),\n    start_local: nullable('Local wall-clock start as YYYY-MM-DDTHH:mm, no offset.'),\n    end_local: nullable('Local wall-clock end as YYYY-MM-DDTHH:mm, no offset. Null if not stated.'),\n    timezone: nullable('IANA timezone (e.g. America/Chicago) only if a timezone or city was stated.'),\n    location: nullable('Meeting place, phone, or video link if stated.'),\n    evidence: nullable('Short verbatim quote from the transcript where the follow-up was agreed.'),\n  }),\n});\n\nconst reference = DateTime.fromISO(input.reference_datetime, { setZone: true });\nconst system = [\n  'You are a meeting analyst. You receive a speaker-labelled transcript and return meeting notes as JSON matching the provided schema.',\n  'Rules:',\n  '- Use only information stated in the transcript. Never invent names, emails, phone numbers, companies, dates, or times; use null when something is not stated.',\n  '- Speaker labels (Speaker A, Speaker B) are not names. Use a person\\'s name only when it is said in the conversation.',\n  '- Emails are often spoken (\"jane dot doe at acme dot com\"). Convert them to normal form (jane.doe@acme.com) only when every part is clear.',\n  '- action_items are concrete commitments or next steps. A deadline is an action item, not an appointment.',\n  '- appointment.detected is true only when participants agree on a specific follow-up meeting, call, demo, or appointment with both a date and a time. A vague plan (\"let\\'s talk next week\") is an action item, not an appointment.',\n  '- Resolve relative dates (\"next Tuesday at 3pm\") against the meeting reference date below. Return start_local and end_local as local wall-clock time YYYY-MM-DDTHH:mm without a UTC offset.',\n  '- Write the notes in the language of the transcript.',\n].join('\\n');\nconst header = [\n  `Meeting reference date/time: ${reference.toFormat('cccc, yyyy-LL-dd HH:mm')} (${input.timezone})`,\n  `Title provided by the sender: ${input.meeting_title}`,\n];\nif (truncated) header.push('Note: the transcript was truncated because it is very long; summarise what is provided.');\nconst user = `${header.join('\\n')}\\n\\nTranscript:\\n\"\"\"\\n${transcript}\\n\"\"\"`;\n\nreturn [\n  {\n    json: {\n      transcript_id: t.id,\n      audio_duration_seconds: t.audio_duration ?? null,\n      transcript_truncated: truncated,\n      transcript_text: transcript,\n      openai_request: {\n        model: input.openai_model,\n        temperature: 0.2,\n        response_format: {\n          type: 'json_schema',\n          json_schema: { name: 'meeting_notes', strict: true, schema },\n        },\n        messages: [\n          { role: 'system', content: system },\n          { role: 'user', content: user },\n        ],\n      },\n    },\n  },\n];"
+      },
+      "id": "71ad1b89-ce4c-417f-a9e9-a786def6ee5f",
+      "name": "Build OpenAI request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.openai_request) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "5a9574d1-0b10-4256-ad5a-632204ceafc8",
+      "name": "OpenAI: summarize transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2020,
+        120
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const response = $input.first().json;\nconst choice = response.choices?.[0] ?? {};\nif (choice.message?.refusal) throw new Error(`OpenAI refused the request: ${choice.message.refusal}`);\nif (choice.finish_reason === 'length') throw new Error('OpenAI response was cut off before the JSON was complete.');\n\nlet notes;\ntry {\n  notes = JSON.parse(choice.message?.content ?? '');\n} catch (error) {\n  throw new Error(`OpenAI did not return valid JSON: ${error.message}`);\n}\n\nconst input = $('Normalize input').first().json;\nconst prep = $('Build OpenAI request').first().json;\n\nconst isEmail = (v) => typeof v === 'string' && /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(v.trim());\nconst contacts = (notes.contacts ?? []).map((c) => ({\n  ...c,\n  email: isEmail(c.email) ? c.email.trim().toLowerCase() : null,\n}));\n// The sender's explicit recipient wins; otherwise use the email the model found in the recording.\nconst recipient =\n  [input.recipient_email, notes.primary_contact_email, ...contacts.map((c) => c.email)]\n    .find(isEmail)\n    ?.trim()\n    .toLowerCase() ?? '';\nconst contact = contacts.find((c) => c.email === recipient) ?? {\n  name: null, email: recipient || null, phone: null, company: null, role: null,\n};\n\n// Appointment: the model returns local wall-clock time; Luxon applies the timezone and DST.\nconst appt = notes.appointment ?? {};\nconst zone = appt.timezone && DateTime.now().setZone(appt.timezone).isValid ? appt.timezone : input.timezone;\nlet start = appt.detected && appt.start_local ? DateTime.fromISO(appt.start_local, { zone }) : null;\nif (start && !start.isValid) start = null;\nlet end = start && appt.end_local ? DateTime.fromISO(appt.end_local, { zone }) : null;\nif (start && (!end || !end.isValid || end <= start)) end = start.plus({ minutes: input.default_appointment_minutes });\nconst hasAppointment = Boolean(start);\nconst title = notes.meeting_title || input.meeting_title;\nconst followUpTitle = appt.title || `Follow-up: ${title}`;\nconst when = start ? `${start.toFormat(\"cccc, LLLL d, yyyy 'at' h:mm a\")} (${zone})` : '';\n\n// ---- Email body (HTML), shared by both paths\nconst esc = (v) => String(v ?? '').replace(/[&<>\"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' })[ch]);\nconst list = (items) => (items.length ? `<ul>${items.map((i) => `<li>${i}</li>`).join('')}</ul>` : '<p>None noted.</p>');\nconst greeting = contact.name ? `Hi ${esc(contact.name.split(' ')[0])},` : 'Hello,';\nconst emailHtml = [\n  `<p>${greeting}</p>`,\n  `<p>Here are the notes from <strong>${esc(title)}</strong>.</p>`,\n  '<h3>Executive summary</h3>',\n  `<p>${esc(notes.executive_summary)}</p>`,\n  '<h3>Key takeaways</h3>',\n  list((notes.key_takeaways ?? []).map(esc)),\n  '<h3>Action items</h3>',\n  list((notes.action_items ?? []).map((a) =>\n    `${esc(a.task)}${a.owner ? ` <em>(owner: ${esc(a.owner)})</em>` : ''}${a.due ? ` <em>(due: ${esc(a.due)})</em>` : ''}`)),\n  hasAppointment\n    ? `<h3>Next meeting</h3><p><strong>${esc(followUpTitle)}</strong><br>${esc(when)}${appt.location ? `<br>${esc(appt.location)}` : ''}</p>`\n    : '',\n  '<p style=\"color:#666;font-size:12px\">These notes were generated automatically from a recording. Reply if anything needs correcting.</p>',\n].join('\\n');\n\n// ---- HubSpot payloads (null fields are left out so existing CRM values are not blanked)\nconst [firstname, ...rest] = (contact.name ?? '').trim().split(/\\s+/);\nconst compact = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined && v !== ''));\nconst hubspotContact = compact({\n  email: recipient,\n  firstname: firstname || null,\n  lastname: rest.join(' ') || null,\n  company: contact.company,\n  phone: contact.phone,\n  jobtitle: contact.role,\n});\nconst hubspotMeeting = hasAppointment\n  ? compact({\n      hs_timestamp: start.toUTC().toISO(),\n      hs_meeting_title: followUpTitle,\n      hs_meeting_start_time: start.toUTC().toISO(),\n      hs_meeting_end_time: end.toUTC().toISO(),\n      hs_meeting_outcome: 'SCHEDULED',\n      hs_meeting_location: appt.location,\n      hs_meeting_body: emailHtml,\n    })\n  : null;\n\nconst calendarDescription = [\n  notes.executive_summary,\n  '',\n  'Action items:',\n  ...(notes.action_items ?? []).map((a) => `- ${a.task}${a.owner ? ` (${a.owner})` : ''}`),\n  '',\n  `Contact: ${[contact.name, recipient, contact.phone].filter(Boolean).join(' | ')}`,\n  appt.evidence ? `Agreed in the recording: \"${appt.evidence}\"` : '',\n  `AssemblyAI transcript: ${prep.transcript_id}`,\n].join('\\n');\n\nreturn [\n  {\n    json: {\n      meeting_title: title,\n      executive_summary: notes.executive_summary,\n      key_takeaways: notes.key_takeaways,\n      action_items: notes.action_items,\n      contacts,\n      recipient_email: recipient,\n      contact,\n      has_appointment: hasAppointment,\n      appointment: hasAppointment\n        ? {\n            title: followUpTitle,\n            start_iso: start.toISO(),\n            end_iso: end.toISO(),\n            timezone: zone,\n            location: appt.location ?? '',\n            evidence: appt.evidence ?? '',\n            display: when,\n          }\n        : null,\n      email_subject: hasAppointment ? `Meeting notes + next meeting: ${title}` : `Meeting notes: ${title}`,\n      email_html: emailHtml,\n      calendar_description: calendarDescription,\n      hubspot_contact_properties: hubspotContact,\n      hubspot_meeting_properties: hubspotMeeting,\n      transcript_id: prep.transcript_id,\n      audio_duration_seconds: prep.audio_duration_seconds,\n      transcript_truncated: prep.transcript_truncated,\n    },\n  },\n];"
+      },
+      "id": "4be7b7b3-7baf-4e9b-a853-43e399621e47",
+      "name": "Parse AI output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "f2ce7b5b-9be3-496e-a731-9688bfcc284b",
+                    "leftValue": "={{ $json.has_appointment }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "true",
+                      "singleValue": true
+                    }
+                  },
+                  {
+                    "id": "767cbbd3-1bc9-43ec-a0c6-4a34c8666a58",
+                    "leftValue": "={{ $json.recipient_email }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Path B: CRM + calendar"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5b7361f6-c88c-4350-a03b-0fcc1ad1da07",
+                    "leftValue": "={{ $json.recipient_email }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Path A: email notes"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "No recipient"
+        }
+      },
+      "id": "4e3a72f3-29b6-4ac1-a52d-ddaf45d47ea1",
+      "name": "Appointment detected?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2460,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/batch/upsert",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ inputs: [{ idProperty: 'email', id: $json.recipient_email, properties: $json.hubspot_contact_properties }] }) }}",
+        "options": {}
+      },
+      "id": "0d762076-203a-4023-a1d5-31a863f2f5ac",
+      "name": "HubSpot: upsert contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2720,
+        -40
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/meetings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Parse AI output').first().json.hubspot_meeting_properties, associations: [{ to: { id: $json.results[0].id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 200 }] }] }) }}",
+        "options": {}
+      },
+      "id": "a5a8180f-c9d0-41ba-a4b1-483b87df031c",
+      "name": "HubSpot: log meeting",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2940,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "primary",
+          "mode": "id"
+        },
+        "start": "={{ $('Parse AI output').first().json.appointment.start_iso }}",
+        "end": "={{ $('Parse AI output').first().json.appointment.end_iso }}",
+        "additionalFields": {
+          "summary": "={{ $('Parse AI output').first().json.appointment.title }}",
+          "description": "={{ $('Parse AI output').first().json.calendar_description }}",
+          "location": "={{ $('Parse AI output').first().json.appointment.location }}"
+        }
+      },
+      "id": "43031ac1-fea3-4765-aea9-321e600a798e",
+      "name": "Google Calendar: create event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [
+        3160,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Parse AI output').first().json.recipient_email }}",
+        "subject": "={{ $('Parse AI output').first().json.email_subject }}",
+        "emailType": "html",
+        "message": "={{ $('Parse AI output').first().json.email_html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "5720d4b4-81cd-4eea-a7fe-81fd10d02f91",
+      "name": "Gmail: send meeting notes",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        3400,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "errorMessage": "={{ 'No recipient email for \"' + $json.meeting_title + '\". Notes are in the Parse AI output node of this execution; resend with recipient_email.' }}"
+      },
+      "id": "2c116285-bcaf-42f3-a1d9-ae8356bde630",
+      "name": "Manual review: no recipient",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        2720,
+        340
+      ]
+    }
+  ],
+  "connections": {
+    "Receive audio (Webhook)": {
+      "main": [
+        [
+          {
+            "node": "Normalize input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New recording in Drive folder": {
+      "main": [
+        [
+          {
+            "node": "Download recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download recording": {
+      "main": [
+        [
+          {
+            "node": "Normalize input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize input": {
+      "main": [
+        [
+          {
+            "node": "Audio file attached?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audio file attached?": {
+      "main": [
+        [
+          {
+            "node": "AssemblyAI: upload audio",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "AssemblyAI: request transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI: upload audio": {
+      "main": [
+        [
+          {
+            "node": "AssemblyAI: request transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI: request transcript": {
+      "main": [
+        [
+          {
+            "node": "Wait 15 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 15 seconds": {
+      "main": [
+        [
+          {
+            "node": "AssemblyAI: get transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AssemblyAI: get transcript": {
+      "main": [
+        [
+          {
+            "node": "Transcript status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transcript status": {
+      "main": [
+        [
+          {
+            "node": "Build OpenAI request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Transcription failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Keep polling?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep polling?": {
+      "main": [
+        [
+          {
+            "node": "Wait 15 seconds",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Transcription timed out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build OpenAI request": {
+      "main": [
+        [
+          {
+            "node": "OpenAI: summarize transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI: summarize transcript": {
+      "main": [
+        [
+          {
+            "node": "Parse AI output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI output": {
+      "main": [
+        [
+          {
+            "node": "Appointment detected?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Appointment detected?": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: upsert contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: send meeting notes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Manual review: no recipient",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: upsert contact": {
+      "main": [
+        [
+          {
+            "node": "HubSpot: log meeting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HubSpot: log meeting": {
+      "main": [
+        [
+          {
+            "node": "Google Calendar: create event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Calendar: create event": {
+      "main": [
+        [
+          {
+            "node": "Gmail: send meeting notes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "9f2566d3-c867-4a16-aa57-8f0056123479"
+}
