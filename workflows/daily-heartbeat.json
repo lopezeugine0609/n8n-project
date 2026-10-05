@@ -1,0 +1,72 @@
+{
+  "name": "Daily Heartbeat",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "triggerAtHour": 9
+            }
+          ]
+        }
+      },
+      "id": "decc8dd8-e074-4fa6-a914-b5bce037fc69",
+      "name": "Every day at 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        260,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "127ca91e-c16d-4c44-ae6f-28f68cba3e45",
+              "name": "status",
+              "value": "ok",
+              "type": "string"
+            },
+            {
+              "id": "5d073219-f0dd-498a-b6dc-472b420659f8",
+              "name": "checkedAt",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e2fcb426-dae9-4a58-ae7c-ae9d2789d653",
+      "name": "Build heartbeat payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        500,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Every day at 9 AM": {
+      "main": [
+        [
+          {
+            "node": "Build heartbeat payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "9fd22ba6-fcaf-42a1-8194-127a3eb12174"
+}

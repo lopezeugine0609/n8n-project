@@ -1,0 +1,5 @@
+.env
+credentials/
+*-credentials.json
+credentials.json
+.n8n/
